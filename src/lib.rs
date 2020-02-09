@@ -4,7 +4,7 @@ use diesel::{
     dsl::Limit,
     query_dsl::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
-        RunQueryDsl,
+        RunQueryDsl, SaveChangesDsl, UpdateAndFetchResults,
     },
     r2d2::{ConnectionManager, Pool},
     result::QueryResult,
@@ -209,5 +209,29 @@ where
         Limit<Self>: LoadQuery<Conn, U>,
     {
         asc.run(|conn| self.first(&*conn)).await
+    }
+}
+
+#[async_trait]
+pub trait AsyncSaveChangesDsl<Conn, AsyncConn> {
+    async fn save_changes_async<U>(self, asc: &AsyncConn) -> AsyncResult<U>
+    where
+        Self: Sized,
+        U: 'static + Send,
+        Conn: UpdateAndFetchResults<Self, U>;
+}
+
+#[async_trait]
+impl<T, Conn> AsyncSaveChangesDsl<Conn, Pool<ConnectionManager<Conn>>> for T
+where
+    T: 'static + Send + SaveChangesDsl<Conn>,
+    Conn: 'static + Connection,
+{
+    async fn save_changes_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<U>
+    where
+        U: 'static + Send,
+        Conn: UpdateAndFetchResults<T, U>,
+    {
+        asc.run(|conn| self.save_changes(&*conn)).await
     }
 }
