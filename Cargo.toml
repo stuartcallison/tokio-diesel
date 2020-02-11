@@ -8,6 +8,10 @@ repository = "https://github.com/mehcode/tokio-diesel"
 license = "MIT/Apache-2.0"
 categories = ["asynchronous", "database"]
 
+[features]
+default = []
+tokio-rt-threaded = []
+
 [dependencies]
 async-trait = "0.1.21"
 diesel = { version = "1.4.3", features = [ "r2d2" ] }

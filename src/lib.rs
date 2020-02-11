@@ -1,3 +1,13 @@
+//! Integrate Diesel into Tokio cleanly and efficiently.
+//!
+//! ## Feature Flags
+//!
+//! - __tokio-rt-threaded__: Available when using the `rt-threaded` feature of tokio.
+//! This feature will remove the `'static` lifetime restriction on the closures sent to the
+//! `AsyncConnection` trait by using `tokio::task::block_in_place` instead of
+//! `tokio::task::spawn_blocking`. It will also remove the `'static` restriction on the
+//! `AsyncRunQueryDsl` and `AsyncSaveChangesDsl` implementations.
+
 use async_trait::async_trait;
 use diesel::{
     connection::SimpleConnection,
@@ -87,15 +97,27 @@ pub trait AsyncConnection<Conn>: AsyncSimpleConnection<Conn>
 where
     Conn: 'static + Connection,
 {
+    #[cfg(not(feature = "tokio-rt-threaded"))]
     async fn run<R, Func>(&self, f: Func) -> AsyncResult<R>
     where
         R: 'static + Send,
         Func: 'static + FnOnce(&Conn) -> QueryResult<R> + Send;
+    #[cfg(feature = "tokio-rt-threaded")]
+    async fn run<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: 'static + Send,
+        Func: FnOnce(&Conn) -> QueryResult<R> + Send;
 
+    #[cfg(not(feature = "tokio-rt-threaded"))]
     async fn transaction<R, Func>(&self, f: Func) -> AsyncResult<R>
     where
         R: 'static + Send,
         Func: 'static + FnOnce(&Conn) -> QueryResult<R> + Send;
+    #[cfg(feature = "tokio-rt-threaded")]
+    async fn transaction<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: 'static + Send,
+        Func: FnOnce(&Conn) -> QueryResult<R> + Send;
 }
 
 #[async_trait]
@@ -103,6 +125,7 @@ impl<Conn> AsyncConnection<Conn> for Pool<ConnectionManager<Conn>>
 where
     Conn: 'static + Connection,
 {
+    #[cfg(not(feature = "tokio-rt-threaded"))]
     #[inline]
     async fn run<R, Func>(&self, f: Func) -> AsyncResult<R>
     where
@@ -117,7 +140,21 @@ where
         .await
         .expect("task has panicked")
     }
+    #[cfg(feature = "tokio-rt-threaded")]
+    #[inline]
+    async fn run<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: 'static + Send,
+        Func: FnOnce(&Conn) -> QueryResult<R> + Send,
+    {
+        let self_ = self.clone();
+        task::block_in_place(move || {
+            let conn = self_.get().map_err(AsyncError::Checkout)?;
+            f(&*conn).map_err(AsyncError::Error)
+        })
+    }
 
+    #[cfg(not(feature = "tokio-rt-threaded"))]
     #[inline]
     async fn transaction<R, Func>(&self, f: Func) -> AsyncResult<R>
     where
@@ -131,6 +168,19 @@ where
         })
         .await
         .expect("task has panicked")
+    }
+    #[cfg(feature = "tokio-rt-threaded")]
+    #[inline]
+    async fn transaction<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: 'static + Send,
+        Func: FnOnce(&Conn) -> QueryResult<R> + Send,
+    {
+        let self_ = self.clone();
+        task::block_in_place(move || {
+            let conn = self_.get().map_err(AsyncError::Checkout)?;
+            conn.transaction(|| f(&*conn)).map_err(AsyncError::Error)
+        })
     }
 }
 
@@ -165,10 +215,58 @@ where
         Limit<Self>: LoadQuery<Conn, U>;
 }
 
+#[cfg(not(feature = "tokio-rt-threaded"))]
 #[async_trait]
 impl<T, Conn> AsyncRunQueryDsl<Conn, Pool<ConnectionManager<Conn>>> for T
 where
     T: 'static + Send + RunQueryDsl<Conn>,
+    Conn: 'static + Connection,
+{
+    async fn execute_async(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<usize>
+    where
+        Self: ExecuteDsl<Conn>,
+    {
+        asc.run(|conn| self.execute(&*conn)).await
+    }
+
+    async fn load_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<Vec<U>>
+    where
+        U: 'static + Send,
+        Self: LoadQuery<Conn, U>,
+    {
+        asc.run(|conn| self.load(&*conn)).await
+    }
+
+    async fn get_result_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<U>
+    where
+        U: 'static + Send,
+        Self: LoadQuery<Conn, U>,
+    {
+        asc.run(|conn| self.get_result(&*conn)).await
+    }
+
+    async fn get_results_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<Vec<U>>
+    where
+        U: 'static + Send,
+        Self: LoadQuery<Conn, U>,
+    {
+        asc.run(|conn| self.get_results(&*conn)).await
+    }
+
+    async fn first_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<U>
+    where
+        U: 'static + Send,
+        Self: LimitDsl,
+        Limit<Self>: LoadQuery<Conn, U>,
+    {
+        asc.run(|conn| self.first(&*conn)).await
+    }
+}
+#[cfg(feature = "tokio-rt-threaded")]
+#[async_trait]
+impl<T, Conn> AsyncRunQueryDsl<Conn, Pool<ConnectionManager<Conn>>> for T
+where
+    T: Send + RunQueryDsl<Conn>,
     Conn: 'static + Connection,
 {
     async fn execute_async(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<usize>
@@ -221,10 +319,27 @@ pub trait AsyncSaveChangesDsl<Conn, AsyncConn> {
         Conn: UpdateAndFetchResults<Self, U>;
 }
 
+#[cfg(not(feature = "tokio-rt-threaded"))]
 #[async_trait]
 impl<T, Conn> AsyncSaveChangesDsl<Conn, Pool<ConnectionManager<Conn>>> for T
 where
     T: 'static + Send + SaveChangesDsl<Conn>,
+    Conn: 'static + Connection,
+{
+    async fn save_changes_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<U>
+    where
+        U: 'static + Send,
+        Conn: UpdateAndFetchResults<T, U>,
+    {
+        asc.run(|conn| self.save_changes(&*conn)).await
+    }
+}
+
+#[cfg(feature = "tokio-rt-threaded")]
+#[async_trait]
+impl<T, Conn> AsyncSaveChangesDsl<Conn, Pool<ConnectionManager<Conn>>> for T
+where
+    T: Send + SaveChangesDsl<Conn>,
     Conn: 'static + Connection,
 {
     async fn save_changes_async<U>(self, asc: &Pool<ConnectionManager<Conn>>) -> AsyncResult<U>
