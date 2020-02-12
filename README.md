@@ -5,6 +5,14 @@
 
 See [the example](./examples/simple.rs) for detailed usage information.
 
+### Feature Flags
+
+- __tokio-rt-threaded__: Available when using the `rt-threaded` feature of tokio.
+    This feature will remove the `'static` lifetime restriction on the closures sent to the
+  `AsyncConnection` trait by using `tokio::task::block_in_place` instead of
+  `tokio::task::spawn_blocking`. It will also remove the `'static` restriction on the
+  `AsyncRunQueryDsl` and `AsyncSaveChangesDsl` implementations.
+
 ## License
 
 Licensed under either of
